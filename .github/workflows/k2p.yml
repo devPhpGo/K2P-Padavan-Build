@@ -1,0 +1,104 @@
+name: Build Padavan
+
+# Controls when the action will run. 
+on: 
+  repository_dispatch:
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-20.04
+    if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) }}
+    env:
+      build_variant: ${{ matrix.build_variant }}
+      targets: ${{ matrix.targets }}
+      images_dir: /opt/images
+      TZ: Asia/Shanghai
+    strategy:
+      matrix:
+        include:
+          - build_variant: "mt7621"
+            targets: "K2P-SSR-5.0"
+    steps:
+      - uses: actions/checkout@v2
+      - name: Prepare environment
+        run: |
+          sudo apt update
+          sudo apt install libtool-bin gperf python-docutils autopoint gettext rsync
+     
+      - name: Clone source code
+        run: |
+            git clone --depth=1 https://github.com/hanwckf/rt-n56u.git /opt/rt-n56u
+            chmod +x addons.sh && sh addons.sh
+            chmod +x setconfig.sh && sh setconfig.sh
+
+      - name: Run shellcheck
+        run: sh /opt/rt-n56u/trunk/tools/shellcheck.sh
+      
+      - name: Prepare toolchain
+        run: |
+          cd /opt/rt-n56u/toolchain-mipsel
+          sh dl_toolchain.sh
+      
+      - name: Start build
+        run: |
+          cd /opt/rt-n56u/trunk
+          mkdir -p ${images_dir}
+          for m in $targets; do fakeroot ./build_firmware_ci $m; \
+          if [ $? = 0 ]; then cp -f images/*.trx ${images_dir}/$m-$(date +"%Y-%m-%d-%H%").trx; else exit 1; fi; \
+          ./clear_tree_simple >/dev/null 2>&1; done
+      
+      - name: Create archive
+        if: ${{ github.event_name != 'release' && success() }}
+        run: |
+          ls -lh ${images_dir}
+          GIT_VERSION=`git rev-parse --short=7 HEAD 2>/dev/null` && [ -n "$GIT_VERSION" ] && \
+          image_name=images_${build_variant}_${GIT_VERSION} || image_name=images_${build_variant}
+          cd ${images_dir}; md5sum *.trx |tee md5sum.txt; 7z a -mx=9 ${image_name}.7z ./*
+          echo "image_name=${image_name}" >> $GITHUB_ENV
+      
+      - name: Upload images to Artifact
+        if: ${{ github.event_name != 'release' && success() }}
+        uses: actions/upload-artifact@v2.2.1
+        with:
+          name: ${{ env.image_name }}
+          path: ${{ env.images_dir }}/*.7z
+      
+      - name: Generate release tag
+        id: tag
+        if: ${{ github.event_name != 'release' && success() }}
+        run: |
+          echo "RELEASE_TAG=$(date +"%Y-%m-%d.%H%M")" >> $GITHUB_ENV
+      
+      - name: Upload images to Releases
+        if: ${{ github.event_name != 'release' && success() }}
+        uses: svenstaro/upload-release-action@2.2.0
+        with:
+          release_name: K2P.K2 Padavan 🚀 | 自动编译 / ${{ env.RELEASE_TAG }}
+          repo_token: ${{ secrets.RELEASE_TOKEN }}
+          file: ${{ env.images_dir }}/*.trx
+          tag: ${{ env.RELEASE_TAG }}
+          body: |   
+            1. 本固件为自动编译
+            2. 使用hanwckf的最新源码 https://github.com/hanwckf/rt-n56u
+            3. PSG12818-K2适配荒野无灯padavan固件网页升级
+            4. AP固件是极简配置，不含无关的自定义扩展，nano为hanwckf原config输出
+          overwrite: true
+          file_glob: true
+    
+      - name: Delete workflow runs
+        uses: GitRML/delete-workflow-runs@main
+        with:
+         retain_days: 1
+         keep_minimum_runs: 3
+
+      - name: Remove old Releases
+        uses: dev-drprasad/delete-older-releases@v0.1.0
+        if: ${{ github.event_name != 'release' && success() }}
+        with:
+         keep_latest: 3
+         delete_tags: true
+        env:
+         GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
